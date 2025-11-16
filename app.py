@@ -9,11 +9,11 @@
 # Uses st.session_state to store temporary filters and recent views.
 # All pandas operations (load_df, save_df, groupby summaries) reused from Version 1.
 # Run the app:
-# streamlit run app.py
-
+#   streamlit run app.py
 
 import os
 import io
+import json
 import datetime as dt
 import pandas as pd
 import streamlit as st
@@ -23,6 +23,9 @@ CSV_DIR = "data"
 REPORTS_DIR = os.path.join(CSV_DIR, "reports")
 CSV = os.path.join(CSV_DIR, "expenses.csv")
 DF_COLS = ["Date", "Amount", "Category", "Description"]
+CATS_JSON = os.path.join(CSV_DIR, "categories.json")
+
+DEFAULT_CATEGORIES = ["Food", "Transport", "Bills", "Groceries", "Health", "Other"]
 
 # ---------------- Bootstrap ----------------
 def ensure_dirs_and_csv() -> None:
@@ -49,7 +52,28 @@ def save_df(df: pd.DataFrame) -> None:
     out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce").fillna(0.0).round(2)
     out.to_csv(CSV, index=False)
 
-# --------------- Helpers Functions ----------------
+# --------------- Categories Config ----------------
+def ensure_categories_file():
+    os.makedirs(CSV_DIR, exist_ok=True)
+    if not os.path.exists(CATS_JSON):
+        with open(CATS_JSON, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CATEGORIES, f)
+
+def load_categories() -> list[str]:
+    """Load categories from JSON, normalize casing, remove duplicates."""
+    ensure_categories_file()
+    with open(CATS_JSON, "r", encoding="utf-8") as f:
+        cats = json.load(f)
+    norm = sorted({c.strip().title() for c in cats if c and c.strip()})
+    return norm
+
+def save_categories(categories: list[str]) -> None:
+    """Save categories back to JSON with normalized casing."""
+    norm = sorted({c.strip().title() for c in categories if c and c.strip()})
+    with open(CATS_JSON, "w", encoding="utf-8") as f:
+        json.dump(norm, f)
+
+# --------------- Helper Functions ----------------
 def format_option_label(row: pd.Series, idx: int) -> str:
     date = str(row.get("Date", ""))
     amt  = float(row.get("Amount", 0.0))
@@ -99,14 +123,19 @@ def page_dashboard():
         st.info("No expenses yet. Use **Add Expense** to create your first entry.")
         return
 
-    # Quick stats row
-    c1, c2, c3 = st.columns(3)
+    # Quick stats row (split date range into Start / End)
+    dmin = df["Date"].min()
+    dmax = df["Date"].max()
+
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total Expenses", f"${df['Amount'].sum():.2f}")
+        st.metric("Total", f"${df['Amount'].sum():.2f}")
     with c2:
         st.metric("Entries", f"{len(df)}")
     with c3:
-        st.metric("Date Range", df_date_range(df))
+        st.metric("Start", dmin if pd.notna(dmin) else "—")
+    with c4:
+        st.metric("End", dmax if pd.notna(dmax) else "—")
 
     st.divider()
 
@@ -130,20 +159,47 @@ def page_dashboard():
 
 def page_add():
     st.header("➕ Add Expense")
+
+    cats = load_categories()
+
     with st.form("add_expense_form", clear_on_submit=True):
         d = st.date_input("Date", value=dt.date.today())
-        amt = st.number_input("Amount", min_value=0.0, step=0.01, format="%.2f")
-        cat = st.text_input("Category (e.g., Food, Transport)", value="General")
+        # More practical step for users (whole currency units)
+        amt = st.number_input("Amount", min_value=0.0, step=1.0, format="%.2f")
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            cat_choice = st.selectbox(
+                "Category",
+                options=cats + ["(Add new...)"],
+                index=0 if cats else len(cats)
+            )
+        with col2:
+            new_cat = st.text_input("If new, type category name", value="")
+
         desc = st.text_input("Description", value="")
         submitted = st.form_submit_button("Save")
 
     if submitted:
-        cat_clean = (cat or "General").strip().title()
-        if not cat_clean:
-            st.error("Category cannot be blank.")
-            return
+        if cat_choice == "(Add new...)":
+            cat_clean = new_cat.strip().title()
+            if not cat_clean:
+                st.error("Please type a new category name or select an existing one.")
+                return
+            # Save new category so it shows up next time
+            all_cats = load_categories()
+            all_cats.append(cat_clean)
+            save_categories(all_cats)
+        else:
+            cat_clean = cat_choice.strip().title()
+
         df = load_df()
-        new_row = {"Date": d.isoformat(), "Amount": float(amt), "Category": cat_clean, "Description": desc.strip()}
+        new_row = {
+            "Date": d.isoformat(),
+            "Amount": float(amt),
+            "Category": cat_clean,
+            "Description": desc.strip()
+        }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         save_df(df)
         st.success("Saved.")
@@ -158,10 +214,17 @@ def page_view_filter():
         return
 
     with st.expander("Filters", expanded=True):
-        # Category list
-        categories = ["All"] + sorted([c for c in df["Category"].dropna().unique() if str(c).strip() != ""])
-        col1, col2, col3 = st.columns([1,1,2])
+        # Category list: combine categories file + what exists in data
+        cats_conf = load_categories()
+        cats_data = sorted([
+            c for c in df["Category"].dropna().unique()
+            if str(c).strip() != ""
+        ])
+        all_cats = sorted(set(cats_conf) | set(cats_data))
+
+        col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
+            categories = ["All"] + all_cats
             cat = st.selectbox("Category", options=categories, index=0)
         with col2:
             start = st.date_input("Start date", value=None)
@@ -172,7 +235,13 @@ def page_view_filter():
         apply_btn = st.button("Apply Filters")
 
     if apply_btn or "last_view" not in st.session_state:
-        filtered = filter_df(df, category=cat, start=start if start else None, end=end if end else None, text=text if text else None)
+        filtered = filter_df(
+            df,
+            category=cat,
+            start=start if start else None,
+            end=end if end else None,
+            text=text if text else None
+        )
         st.session_state["last_view"] = filtered.copy()
     else:
         filtered = st.session_state["last_view"]
@@ -232,7 +301,7 @@ def page_edit():
         st.info("No expenses to edit.")
         return
 
-    # Choose record
+    # Choose record (simple version)
     options = [format_option_label(df.iloc[i], i) for i in range(len(df))]
     choice = st.selectbox("Select an entry to edit", options=options)
     idx = int(choice.split("]")[0].lstrip("[")) if choice else None
@@ -240,9 +309,23 @@ def page_edit():
 
     if row is not None:
         with st.form("edit_form"):
-            d = st.date_input("Date", value=dt.date.fromisoformat(str(row["Date"]) or dt.date.today().isoformat()))
-            amt = st.number_input("Amount", min_value=0.0, step=0.01, value=float(row["Amount"]), format="%.2f")
-            cat = st.text_input("Category", value=str(row["Category"] or "General"))
+            d = st.date_input(
+                "Date",
+                value=dt.date.fromisoformat(str(row["Date"]) or dt.date.today().isoformat())
+            )
+            amt = st.number_input(
+                "Amount",
+                min_value=0.0,
+                step=1.0,
+                value=float(row["Amount"]),
+                format="%.2f"
+            )
+            cats = load_categories()
+            # If stored category not in list, just show as text
+            if row["Category"] in cats:
+                cat = st.selectbox("Category", options=cats, index=cats.index(row["Category"]))
+            else:
+                cat = st.selectbox("Category", options=cats, index=0)
             desc = st.text_input("Description", value=str(row["Description"] or ""))
             submitted = st.form_submit_button("Update")
 
@@ -282,13 +365,13 @@ def page_delete():
             st.button("Cancel")
 
     st.divider()
-    st.subheader("Delete Last Entry (Undo)")
-    if st.button("Delete last row"):
+    st.subheader("Undo: delete last added entry")
+    if st.button("Undo last add"):
         if not df.empty:
             last = df.iloc[-1].to_dict()
             df = df.iloc[:-1].reset_index(drop=True)
             save_df(df)
-            st.success(f"Deleted last entry: {last}")
+            st.success(f"Undid last entry: {last}")
             st.rerun()
         else:
             st.info("No expenses to delete.")
@@ -324,6 +407,44 @@ def page_export():
             mime="text/csv"
         )
 
+def page_categories():
+    st.header("🏷️ Categories")
+
+    cats = load_categories()
+
+    st.subheader("Existing Categories")
+    if cats:
+        st.write(", ".join(cats))
+    else:
+        st.info("No categories yet.")
+
+    # Add category
+    with st.form("add_cat_form"):
+        new_cat = st.text_input("Add a new category", placeholder="e.g., Entertainment")
+        submitted = st.form_submit_button("Add")
+    if submitted:
+        if not new_cat.strip():
+            st.error("Category cannot be blank.")
+        else:
+            cats.append(new_cat.strip())
+            save_categories(cats)
+            st.success(f"Added category: {new_cat.strip().title()}")
+            st.rerun()
+
+    st.divider()
+
+    # Delete category
+    st.subheader("Delete Category")
+    if cats:
+        cat_to_delete = st.selectbox("Select category to delete", options=cats)
+        if st.button("Delete selected category"):
+            remain = [c for c in cats if c != cat_to_delete]
+            save_categories(remain)
+            st.success(f"Deleted category: {cat_to_delete}")
+            st.rerun()
+    else:
+        st.info("No categories to delete.")
+
 # --------------- App Layout ---------------
 def main():
     st.set_page_config(page_title="Expense Tracker", page_icon="💵", layout="wide")
@@ -333,7 +454,16 @@ def main():
         st.header("Navigation")
         page = st.radio(
             "Go to",
-            options=["Dashboard", "Add Expense", "View & Filter", "Summaries", "Edit Entry", "Delete", "Export"],
+            options=[
+                "Dashboard",
+                "Add Expense",
+                "View & Filter",
+                "Summaries",
+                "Edit Entry",
+                "Delete",
+                "Export",
+                "Categories",
+            ],
             index=0
         )
         st.caption("Tip: Data persists in data/expenses.csv")
@@ -352,6 +482,8 @@ def main():
         page_delete()
     elif page == "Export":
         page_export()
+    elif page == "Categories":
+        page_categories()
 
 if __name__ == "__main__":
     main()
