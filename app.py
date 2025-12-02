@@ -17,6 +17,7 @@ import json
 import datetime as dt
 import pandas as pd
 import streamlit as st
+import altair as alt  # for richer charts
 
 # ---------------- Paths / constants ----------------
 CSV_DIR = "data"
@@ -26,6 +27,16 @@ DF_COLS = ["Date", "Amount", "Category", "Description"]
 CATS_JSON = os.path.join(CSV_DIR, "categories.json")
 
 DEFAULT_CATEGORIES = ["Food", "Transport", "Bills", "Groceries", "Health", "Other"]
+
+# Optional monthly budgets per category (for warnings on dashboard)
+CATEGORY_BUDGETS = {
+    "Food": 300.0,
+    "Transport": 150.0,
+    "Bills": 400.0,
+    "Groceries": 250.0,
+    "Health": 150.0,
+    "Other": 100.0,
+}
 
 # ---------------- Bootstrap ----------------
 def ensure_dirs_and_csv() -> None:
@@ -102,13 +113,6 @@ def filter_df(df: pd.DataFrame, category: str | None, start: dt.date | None, end
 
     return df[mask]
 
-def df_date_range(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "—"
-    dmin = df["Date"].min()
-    dmax = df["Date"].max()
-    return f"{dmin} → {dmax}"
-
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -143,50 +147,143 @@ def page_dashboard():
     st.subheader("Recent Expenses")
     st.dataframe(df.tail(10).reset_index(drop=True), use_container_width=True)
 
-    # Category breakdown (table + bar)
+    # Category breakdown (table + Altair bar chart)
     st.subheader("Category Breakdown")
-    cat_tbl = df.groupby("Category", dropna=False)["Amount"].sum().sort_values(ascending=False).reset_index()
+    cat_tbl = (
+        df.groupby("Category", dropna=False)["Amount"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
     st.dataframe(cat_tbl, use_container_width=True)
-    st.bar_chart(cat_tbl.set_index("Category"))
 
-    # Monthly trend
+    if not cat_tbl.empty:
+        cat_chart = (
+            alt.Chart(cat_tbl)
+            .mark_bar()
+            .encode(
+                x=alt.X("Category:N", sort="-y"),
+                y=alt.Y("Amount:Q"),
+                color="Category:N",
+                tooltip=["Category", "Amount"],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(cat_chart, use_container_width=True)
+
+    # Monthly trend (Altair line chart)
     st.subheader("Monthly Spending Trend")
-    # derive YYYY-MM
     months = df.copy()
     months["Month"] = months["Date"].str.slice(0, 7)
-    month_tbl = months.groupby("Month", dropna=False)["Amount"].sum().reset_index()
-    st.line_chart(month_tbl.set_index("Month"))
+    month_tbl = (
+        months.groupby("Month", dropna=False)["Amount"]
+        .sum()
+        .reset_index()
+        .sort_values("Month")
+    )
+
+    if not month_tbl.empty:
+        month_chart = (
+            alt.Chart(month_tbl)
+            .mark_line(point=True)
+            .encode(
+                x="Month:N",
+                y="Amount:Q",
+                tooltip=["Month", "Amount"],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(month_chart, use_container_width=True)
+    else:
+        st.info("No monthly data yet.")
+
+    st.divider()
+
+    # Monthly budget warnings (for current month)
+    st.subheader("Monthly Budget Warnings (this month)")
+    current_month = dt.date.today().isoformat()[:7]
+    this_month = df[df["Date"].str.startswith(current_month)]
+
+    if this_month.empty:
+        st.info("No expenses recorded for this month yet.")
+    else:
+        totals = this_month.groupby("Category")["Amount"].sum()
+        any_warning = False
+        for cat, total in totals.items():
+            budget = CATEGORY_BUDGETS.get(cat)
+            if not budget:
+                continue  # no budget defined for this category
+            any_warning = True
+            if total >= budget:
+                st.error(f"{cat}: ${total:.2f} / ${budget:.2f} — OVER budget")
+            elif total >= 0.8 * budget:
+                st.warning(f"{cat}: ${total:.2f} / ${budget:.2f} — close to budget")
+            else:
+                st.success(f"{cat}: ${total:.2f} / ${budget:.2f} — within budget")
+        if not any_warning:
+            st.info("No budgets defined for the categories used this month.")
 
 def page_add():
     st.header("➕ Add Expense")
 
     cats = load_categories()
 
-    with st.form("add_expense_form", clear_on_submit=True):
-        d = st.date_input("Date", value=dt.date.today())
-        # More practical step for users (whole currency units)
-        amt = st.number_input("Amount", min_value=0.0, step=1.0, format="%.2f")
+    # Initialize amount in session state (for quick buttons)
+    if "amount_input" not in st.session_state:
+        st.session_state["amount_input"] = 0.0
 
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            cat_choice = st.selectbox(
-                "Category",
-                options=cats + ["(Add new...)"],
-                index=0 if cats else len(cats)
+    # Main form
+    with st.form("add_expense_form"):
+        d = st.date_input("Date", value=dt.date.today())
+
+        col_amount, col_cat = st.columns([1.2, 1.8])
+        with col_amount:
+            # Use session_state value (no key here!)
+            amt = st.number_input(
+                "Amount",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                value=float(st.session_state["amount_input"]),
             )
-        with col2:
-            new_cat = st.text_input("If new, type category name", value="")
+
+        with col_cat:
+            col1, col2 = st.columns(2)
+            with col1:
+                cat_choice = st.selectbox(
+                    "Category",
+                    options=cats + ["(Add new...)"],
+                    index=0 if cats else len(cats),
+                )
+            with col2:
+                new_cat = st.text_input("If new, type category", value="")
 
         desc = st.text_input("Description", value="")
         submitted = st.form_submit_button("Save")
 
+    # Quick-entry amount buttons (+5, +10, +20)
+    st.caption("Quick amount buttons (optional):")
+    q1, q2, q3 = st.columns(3)
+    with q1:
+        if st.button("+5"):
+            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 5
+    with q2:
+        if st.button("+10"):
+            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 10
+    with q3:
+        if st.button("+20"):
+            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 20
+
+    # When user clicks Save
     if submitted:
+        # Keep session_state in sync with what was actually submitted
+        st.session_state["amount_input"] = float(amt)
+
         if cat_choice == "(Add new...)":
             cat_clean = new_cat.strip().title()
             if not cat_clean:
                 st.error("Please type a new category name or select an existing one.")
                 return
-            # Save new category so it shows up next time
             all_cats = load_categories()
             all_cats.append(cat_clean)
             save_categories(all_cats)
@@ -198,12 +295,16 @@ def page_add():
             "Date": d.isoformat(),
             "Amount": float(amt),
             "Category": cat_clean,
-            "Description": desc.strip()
+            "Description": desc.strip(),
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         save_df(df)
         st.success("Saved.")
+
+        # Reset amount back to 0 for next entry
+        st.session_state["amount_input"] = 0.0
         st.rerun()
+
 
 def page_view_filter():
     st.header("👁️ View & Filter")
@@ -216,10 +317,13 @@ def page_view_filter():
     with st.expander("Filters", expanded=True):
         # Category list: combine categories file + what exists in data
         cats_conf = load_categories()
-        cats_data = sorted([
-            c for c in df["Category"].dropna().unique()
-            if str(c).strip() != ""
-        ])
+        cats_data = sorted(
+            [
+                c
+                for c in df["Category"].dropna().unique()
+                if str(c).strip() != ""
+            ]
+        )
         all_cats = sorted(set(cats_conf) | set(cats_data))
 
         col1, col2, col3 = st.columns([1, 1, 2])
@@ -240,7 +344,7 @@ def page_view_filter():
             category=cat,
             start=start if start else None,
             end=end if end else None,
-            text=text if text else None
+            text=text if text else None,
         )
         st.session_state["last_view"] = filtered.copy()
     else:
@@ -256,7 +360,7 @@ def page_view_filter():
         label="⬇️ Download current view as CSV",
         data=export_csv_bytes(filtered),
         file_name=f"expenses_view_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
 def page_summaries():
@@ -270,29 +374,72 @@ def page_summaries():
 
     # By Category
     with tabs[0]:
-        tbl = df.groupby("Category", dropna=False)["Amount"].sum().reset_index(name="Total").sort_values("Total", ascending=False)
+        tbl = (
+            df.groupby("Category", dropna=False)["Amount"]
+            .sum()
+            .reset_index(name="Total")
+            .sort_values("Total", ascending=False)
+        )
         st.dataframe(tbl, use_container_width=True)
         if not tbl.empty:
-            chart_df = tbl.set_index("Category")
-            st.bar_chart(chart_df)
+            cat_chart = (
+                alt.Chart(tbl)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Category:N", sort="-y"),
+                    y="Total:Q",
+                    color="Category:N",
+                    tooltip=["Category", "Total"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(cat_chart, use_container_width=True)
 
     # By Date
     with tabs[1]:
-        tbl = df.groupby("Date", dropna=False)["Amount"].sum().reset_index(name="Total").sort_values("Date")
+        tbl = (
+            df.groupby("Date", dropna=False)["Amount"]
+            .sum()
+            .reset_index(name="Total")
+            .sort_values("Date")
+        )
         st.dataframe(tbl, use_container_width=True)
         if not tbl.empty:
-            chart_df = tbl.set_index("Date")
-            st.line_chart(chart_df)
+            date_chart = (
+                alt.Chart(tbl)
+                .mark_line(point=True)
+                .encode(
+                    x="Date:N",
+                    y="Total:Q",
+                    tooltip=["Date", "Total"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(date_chart, use_container_width=True)
 
     # By Month
     with tabs[2]:
         m = df.copy()
         m["Month"] = m["Date"].str.slice(0, 7)
-        tbl = m.groupby("Month", dropna=False)["Amount"].sum().reset_index(name="Total").sort_values("Month")
+        tbl = (
+            m.groupby("Month", dropna=False)["Amount"]
+            .sum()
+            .reset_index(name="Total")
+            .sort_values("Month")
+        )
         st.dataframe(tbl, use_container_width=True)
         if not tbl.empty:
-            chart_df = tbl.set_index("Month")
-            st.line_chart(chart_df)
+            month_chart = (
+                alt.Chart(tbl)
+                .mark_line(point=True)
+                .encode(
+                    x="Month:N",
+                    y="Total:Q",
+                    tooltip=["Month", "Total"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(month_chart, use_container_width=True)
 
 def page_edit():
     st.header("✏️ Edit Entry")
@@ -301,29 +448,63 @@ def page_edit():
         st.info("No expenses to edit.")
         return
 
-    # Choose record (simple version)
-    options = [format_option_label(df.iloc[i], i) for i in range(len(df))]
+    # Filters for Edit page (month + category)
+    with st.expander("Filters (optional)", expanded=False):
+        # Months from data
+        months = sorted(df["Date"].str.slice(0, 7).dropna().unique().tolist())
+        months = ["All"] + months
+        month_sel = st.selectbox("Month", options=months, index=0)
+
+        cats_conf = load_categories()
+        cats_data = sorted(
+            [
+                c
+                for c in df["Category"].dropna().unique()
+                if str(c).strip() != ""
+            ]
+        )
+        all_cats = sorted(set(cats_conf) | set(cats_data))
+        categories = ["All"] + all_cats
+        cat_sel = st.selectbox("Category", options=categories, index=0)
+
+    df_filtered = df.copy()
+    if month_sel != "All":
+        df_filtered = df_filtered[df_filtered["Date"].str.slice(0, 7) == month_sel]
+    if cat_sel != "All":
+        df_filtered = df_filtered[df_filtered["Category"].str.lower() == cat_sel.lower()]
+
+    if df_filtered.empty:
+        st.warning("No entries match the selected filters.")
+        return
+
+    # Use original DataFrame index in label
+    options = [
+        format_option_label(df_filtered.loc[idx], idx) for idx in df_filtered.index
+    ]
     choice = st.selectbox("Select an entry to edit", options=options)
     idx = int(choice.split("]")[0].lstrip("[")) if choice else None
-    row = df.iloc[idx] if idx is not None else None
+    row = df.loc[idx] if idx is not None else None
 
     if row is not None:
         with st.form("edit_form"):
             d = st.date_input(
                 "Date",
-                value=dt.date.fromisoformat(str(row["Date"]) or dt.date.today().isoformat())
+                value=dt.date.fromisoformat(
+                    str(row["Date"]) or dt.date.today().isoformat()
+                ),
             )
             amt = st.number_input(
                 "Amount",
                 min_value=0.0,
                 step=1.0,
                 value=float(row["Amount"]),
-                format="%.2f"
+                format="%.2f",
             )
             cats = load_categories()
-            # If stored category not in list, just show as text
             if row["Category"] in cats:
-                cat = st.selectbox("Category", options=cats, index=cats.index(row["Category"]))
+                cat = st.selectbox(
+                    "Category", options=cats, index=cats.index(row["Category"])
+                )
             else:
                 cat = st.selectbox("Category", options=cats, index=0)
             desc = st.text_input("Description", value=str(row["Description"] or ""))
@@ -334,7 +515,7 @@ def page_edit():
             if not cat_clean:
                 st.error("Category cannot be blank.")
                 return
-            df.iloc[idx] = [d.isoformat(), float(amt), cat_clean.title(), desc.strip()]
+            df.loc[idx] = [d.isoformat(), float(amt), cat_clean.title(), desc.strip()]
             save_df(df)
             st.success("Updated.")
             st.rerun()
@@ -383,20 +564,24 @@ def page_export():
         st.info("No expenses yet.")
         return
 
-    st.write("Download either the **current filtered view** (from the View page) or the **entire dataset**.")
+    st.write(
+        "Download either the **current filtered view** (from the View page) or the **entire dataset**."
+    )
     filtered = st.session_state.get("last_view", pd.DataFrame(columns=DF_COLS))
 
     col1, col2 = st.columns(2)
     with col1:
         st.write("Current View")
         if filtered.empty:
-            st.info("No filtered view available yet. Go to **View & Filter** and apply filters.")
+            st.info(
+                "No filtered view available yet. Go to **View & Filter** and apply filters."
+            )
         else:
             st.download_button(
                 label="⬇️ Download current view as CSV",
                 data=export_csv_bytes(filtered),
                 file_name=f"expenses_view_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
     with col2:
         st.write("All Data")
@@ -404,7 +589,7 @@ def page_export():
             label="⬇️ Download ALL data as CSV",
             data=export_csv_bytes(df),
             file_name=f"expenses_all_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
 def page_categories():
@@ -464,7 +649,7 @@ def main():
                 "Export",
                 "Categories",
             ],
-            index=0
+            index=0,
         )
         st.caption("Tip: Data persists in data/expenses.csv")
 
@@ -474,7 +659,7 @@ def main():
         page_add()
     elif page == "View & Filter":
         page_view_filter()
-    elif page == "Summaries": 
+    elif page == "Summaries":
         page_summaries()
     elif page == "Edit Entry":
         page_edit()
