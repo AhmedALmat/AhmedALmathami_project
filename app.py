@@ -1,15 +1,21 @@
-# (Expense Tracker, Version 2 – Streamlit Edition)
-# This version upgrades the original CLI-based Expense Tracker to an interactive web application using the Streamlit framework.
-# Data Handling:
-# All expense data is stored in data/expenses.csv.
-# pandas is used for reading, writing, filtering, and summarizing the data.
-# Technical Details:
-# Streamlit widgets (st.date_input, st.number_input, st.text_input, etc.)
-# replace CLI input() prompts for a graphical interface.
-# Uses st.session_state to store temporary filters and recent views.
-# All pandas operations (load_df, save_df, groupby summaries) reused from Version 1.
-# Run the app:
-#   streamlit run app.py
+"""
+Expense Tracker (Streamlit Edition)
+
+This module implements a small personal expense tracking application with
+a Streamlit-based web UI. Users can:
+
+- Add, edit, delete, and filter expenses stored in data/expenses.csv
+- Manage categories stored in data/categories.json
+- View dashboards and summaries (by category, date, month)
+- Export filtered or full data sets as CSV files
+- See optional monthly budget warnings per category
+
+Run the app with:
+
+    streamlit run app.py
+
+The main entry point is the `main()` function at the bottom of this file.
+"""
 
 import os
 import io
@@ -29,6 +35,7 @@ CATS_JSON = os.path.join(CSV_DIR, "categories.json")
 DEFAULT_CATEGORIES = ["Food", "Transport", "Bills", "Groceries", "Health", "Other"]
 
 # Optional monthly budgets per category (for warnings on dashboard)
+# TODO: In the future, this could be loaded from a separate config file or edited via a UI page.
 CATEGORY_BUDGETS = {
     "Food": 300.0,
     "Transport": 150.0,
@@ -38,63 +45,129 @@ CATEGORY_BUDGETS = {
     "Other": 100.0,
 }
 
+
 # ---------------- Bootstrap ----------------
 def ensure_dirs_and_csv() -> None:
+    """Ensure data folders and main CSV file exist.
+
+    Creates the data/ and data/reports/ directories if needed and
+    initializes an empty expenses.csv file with the expected columns
+    if the file does not exist or is empty.
+    """
     os.makedirs(CSV_DIR, exist_ok=True)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     if not os.path.exists(CSV) or os.path.getsize(CSV) == 0:
         pd.DataFrame(columns=DF_COLS).to_csv(CSV, index=False)
 
+
 def load_df() -> pd.DataFrame:
+    """Load all expenses from CSV into a pandas DataFrame.
+
+    Returns:
+        A DataFrame with columns: Date, Amount, Category, Description.
+        If the CSV is empty or missing, an empty DataFrame is returned.
+    """
     ensure_dirs_and_csv()
     if os.path.getsize(CSV) == 0:
         return pd.DataFrame(columns=DF_COLS)
     df = pd.read_csv(CSV, dtype=str)
     df = df.reindex(columns=DF_COLS)
-    # normalize
+    # Normalize numeric and text columns
     df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0).round(2)
     df["Category"] = df["Category"].fillna("").astype(str)
     df["Description"] = df["Description"].fillna("").astype(str)
     return df
 
+
 def save_df(df: pd.DataFrame) -> None:
+    """Save the given expenses DataFrame back to the CSV file.
+
+    The function normalizes the column order and amount type before writing.
+
+    Args:
+        df: A DataFrame with at least the DF_COLS columns.
+    """
     out = df.copy()
     out = out.reindex(columns=DF_COLS)
     out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce").fillna(0.0).round(2)
     out.to_csv(CSV, index=False)
 
+
 # --------------- Categories Config ----------------
-def ensure_categories_file():
+def ensure_categories_file() -> None:
+    """Ensure the categories JSON file exists.
+
+    If the JSON file does not exist, create it with DEFAULT_CATEGORIES.
+    """
     os.makedirs(CSV_DIR, exist_ok=True)
     if not os.path.exists(CATS_JSON):
         with open(CATS_JSON, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_CATEGORIES, f)
 
+
 def load_categories() -> list[str]:
-    """Load categories from JSON, normalize casing, remove duplicates."""
+    """Load categories from JSON, normalize casing, remove duplicates.
+
+    Returns:
+        A sorted list of unique category names in title case.
+    """
     ensure_categories_file()
     with open(CATS_JSON, "r", encoding="utf-8") as f:
         cats = json.load(f)
     norm = sorted({c.strip().title() for c in cats if c and c.strip()})
     return norm
 
+
 def save_categories(categories: list[str]) -> None:
-    """Save categories back to JSON with normalized casing."""
+    """Save categories back to JSON with normalized casing.
+
+    Args:
+        categories: A list of category names to be saved.
+    """
     norm = sorted({c.strip().title() for c in categories if c and c.strip()})
     with open(CATS_JSON, "w", encoding="utf-8") as f:
         json.dump(norm, f)
 
+
 # --------------- Helper Functions ----------------
 def format_option_label(row: pd.Series, idx: int) -> str:
+    """Format a single row as a human-readable label for dropdowns.
+
+    Args:
+        row: A pandas Series representing one expense row.
+        idx: The original index of the row (used as an identifier).
+
+    Returns:
+        A string like: "[12] 2025-01-01 | $10.00 | Food | Short description..."
+    """
     date = str(row.get("Date", ""))
-    amt  = float(row.get("Amount", 0.0))
-    cat  = str(row.get("Category", ""))
+    amt = float(row.get("Amount", 0.0))
+    cat = str(row.get("Category", ""))
     desc = str(row.get("Description", ""))
     if len(desc) > 40:
         desc = desc[:37] + "..."
     return f"[{idx}] {date} | ${amt:.2f} | {cat} | {desc}"
 
-def filter_df(df: pd.DataFrame, category: str | None, start: dt.date | None, end: dt.date | None, text: str | None) -> pd.DataFrame:
+
+def filter_df(
+    df: pd.DataFrame,
+    category: str | None,
+    start: dt.date | None,
+    end: dt.date | None,
+    text: str | None,
+) -> pd.DataFrame:
+    """Filter the expenses DataFrame by category, date range, and text.
+
+    Args:
+        df: Full expenses DataFrame.
+        category: Category name to filter by, or 'All'/None for no filter.
+        start: Optional start date (inclusive).
+        end: Optional end date (inclusive).
+        text: Optional substring to search across all fields (case-insensitive).
+
+    Returns:
+        A filtered DataFrame containing only matching rows.
+    """
     if df.empty:
         return df
     mask = pd.Series(True, index=df.index)
@@ -108,18 +181,40 @@ def filter_df(df: pd.DataFrame, category: str | None, start: dt.date | None, end
         mask &= df["Date"] <= end.isoformat()
 
     if text:
+        # GOTCHA: This text search converts the whole row to a single string,
+        # which is simple but can be slow for very large datasets.
         blob = df.astype(str).apply(lambda row: " ".join(row.values).lower(), axis=1)
         mask &= blob.str.contains(text.lower(), na=False)
 
     return df[mask]
 
+
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
+    """Convert a DataFrame to CSV bytes for Streamlit download buttons.
+
+    Args:
+        df: The DataFrame to export.
+
+    Returns:
+        Bytes containing the CSV representation of the DataFrame.
+    """
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
+
 # --------------- UI Pages ----------------
-def page_dashboard():
+def page_dashboard() -> None:
+    """Render the main dashboard page.
+
+    Shows:
+        - Total amount and number of entries
+        - Start and end date of the data
+        - Recent expenses table
+        - Category breakdown (table + bar chart)
+        - Monthly spending trend (line chart)
+        - Monthly budget warnings for the current month
+    """
     st.header("📊 Dashboard")
 
     df = load_df()
@@ -223,7 +318,16 @@ def page_dashboard():
         if not any_warning:
             st.info("No budgets defined for the categories used this month.")
 
-def page_add():
+
+def page_add() -> None:
+    """Render the Add Expense page.
+
+    Allows the user to:
+        - Pick a date
+        - Enter an amount (with quick +5, +10, +20 buttons)
+        - Choose or add a category
+        - Enter an optional description
+    """
     st.header("➕ Add Expense")
 
     cats = load_categories()
@@ -266,13 +370,19 @@ def page_add():
     q1, q2, q3 = st.columns(3)
     with q1:
         if st.button("+5"):
-            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 5
+            st.session_state["amount_input"] = float(
+                st.session_state.get("amount_input", 0.0)
+            ) + 5
     with q2:
         if st.button("+10"):
-            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 10
+            st.session_state["amount_input"] = float(
+                st.session_state.get("amount_input", 0.0)
+            ) + 10
     with q3:
         if st.button("+20"):
-            st.session_state["amount_input"] = float(st.session_state.get("amount_input", 0.0)) + 20
+            st.session_state["amount_input"] = float(
+                st.session_state.get("amount_input", 0.0)
+            ) + 20
 
     # When user clicks Save
     if submitted:
@@ -306,7 +416,14 @@ def page_add():
         st.rerun()
 
 
-def page_view_filter():
+def page_view_filter() -> None:
+    """Render the View & Filter page.
+
+    Allows the user to:
+        - Filter by category, date range, and keyword
+        - View the filtered DataFrame
+        - Download the filtered set as CSV
+    """
     st.header("👁️ View & Filter")
 
     df = load_df()
@@ -363,7 +480,15 @@ def page_view_filter():
         mime="text/csv",
     )
 
-def page_summaries():
+
+def page_summaries() -> None:
+    """Render the Summaries page.
+
+    Provides three tabs:
+        - By Category: totals per category (table + bar chart)
+        - By Date: totals per day (table + line chart)
+        - By Month: totals per month (table + line chart)
+    """
     st.header("📈 Summaries")
     df = load_df()
     if df.empty:
@@ -441,7 +566,15 @@ def page_summaries():
             )
             st.altair_chart(month_chart, use_container_width=True)
 
-def page_edit():
+
+def page_edit() -> None:
+    """Render the Edit Entry page.
+
+    Allows the user to:
+        - Filter entries by month and category
+        - Select a specific entry
+        - Update date, amount, category, and description
+    """
     st.header("✏️ Edit Entry")
     df = load_df()
     if df.empty:
@@ -471,13 +604,16 @@ def page_edit():
     if month_sel != "All":
         df_filtered = df_filtered[df_filtered["Date"].str.slice(0, 7) == month_sel]
     if cat_sel != "All":
-        df_filtered = df_filtered[df_filtered["Category"].str.lower() == cat_sel.lower()]
+        df_filtered = df_filtered[
+            df_filtered["Category"].str.lower() == cat_sel.lower()
+        ]
 
     if df_filtered.empty:
         st.warning("No entries match the selected filters.")
         return
 
-    # Use original DataFrame index in label
+    # GOTCHA: For very large datasets, this dropdown might still be long.
+    # Filters above help reduce the number of options.
     options = [
         format_option_label(df_filtered.loc[idx], idx) for idx in df_filtered.index
     ]
@@ -520,7 +656,14 @@ def page_edit():
             st.success("Updated.")
             st.rerun()
 
-def page_delete():
+
+def page_delete() -> None:
+    """Render the Delete page.
+
+    Provides:
+        - Delete-by-entry (with a confirmation step)
+        - Undo last added entry (delete last row)
+    """
     st.header("🗑️ Delete")
     df = load_df()
     if df.empty:
@@ -530,7 +673,9 @@ def page_delete():
     # Delete by index
     st.subheader("Delete by Index")
     options = [format_option_label(df.iloc[i], i) for i in range(len(df))]
-    choice = st.selectbox("Select an entry to delete", options=options, key="delete_select")
+    choice = st.selectbox(
+        "Select an entry to delete", options=options, key="delete_select"
+    )
     idx = int(choice.split("]")[0].lstrip("[")) if choice else None
 
     if idx is not None:
@@ -557,7 +702,14 @@ def page_delete():
         else:
             st.info("No expenses to delete.")
 
-def page_export():
+
+def page_export() -> None:
+    """Render the Export page.
+
+    Allows the user to:
+        - Download the last filtered view
+        - Download the full dataset
+    """
     st.header("📤 Export")
     df = load_df()
     if df.empty:
@@ -592,7 +744,15 @@ def page_export():
             mime="text/csv",
         )
 
-def page_categories():
+
+def page_categories() -> None:
+    """Render the Categories page.
+
+    Allows the user to:
+        - View existing categories
+        - Add new categories
+        - Delete existing categories
+    """
     st.header("🏷️ Categories")
 
     cats = load_categories()
@@ -630,8 +790,14 @@ def page_categories():
     else:
         st.info("No categories to delete.")
 
+
 # --------------- App Layout ---------------
-def main():
+def main() -> None:
+    """Main entry point for the Streamlit app.
+
+    Sets the page configuration, renders the sidebar navigation, and
+    dispatches to the appropriate page_* function based on user choice.
+    """
     st.set_page_config(page_title="Expense Tracker", page_icon="💵", layout="wide")
     st.title("💵 Expense Tracker")
 
@@ -669,6 +835,7 @@ def main():
         page_export()
     elif page == "Categories":
         page_categories()
+
 
 if __name__ == "__main__":
     main()
